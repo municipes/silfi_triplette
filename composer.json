@@ -1,0 +1,21 @@
+{
+    "name": "municipes/silfi_triplette",
+    "description": "Importazione della tassonomia Triplette.",
+    "type": "drupal-module",
+    "license": "GPL-3.0-only",
+    "homepage": "https://github.com/municipes/silfi_triplette",
+    "authors": [
+        {
+            "name": "Maurizio Cavalletti",
+            "homepage":"https://www.drupal.org/u/maurizio_akabit",
+            "role": "Maintainer"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/municipes/silfi_triplette/issues",
+        "source": "https://github.com/municipes/silfi_triplette"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "require": { }
+}
