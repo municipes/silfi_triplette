@@ -174,57 +174,93 @@ class TripletteImport {
   private function checkOrCreateTerm(string $name, string $description = null, int $parent = 0, int $id = null) : Term {
     $term = NULL;
 
-    // Strategia diversa basata sul livello della tassonomia
-    if ($id !== null) {
-      // Questo è un termine di secondo livello con ID
-      // Cerchiamo prima per ID, indipendentemente dal parent
+    // Caso speciale per termini di primo livello (parent=0)
+    if ($parent == 0) {
+      // Per termini di primo livello, cerchiamo SOLO per nome tra i termini radice
       $query = \Drupal::entityQuery('taxonomy_term')
         ->condition('vid', $this->vid)
-        ->condition('field_id', $id)
+        ->condition('name', $name)
         ->accessCheck(FALSE);
+
+      // Aggiungiamo una condizione per selezionare solo termini radice
+      // In Drupal, i termini radice non hanno valori nella tabella taxonomy_term_hierarchy
       $tids = $query->execute();
 
       if (!empty($tids)) {
-        // Trovato un termine con questo ID
-        $term = Term::load(reset($tids));
-        // Non importa quale sia il parent attuale, lo aggiorneremo dopo
-      } else {
-        // Cerchiamo nella nostra tabella personalizzata
-        $existingTermData = $this->tripletteExist($id);
-        if ($existingTermData) {
-          $term = Term::load($existingTermData['tid']);
-        }
-      }
-    } else {
-      // Questo è un termine di primo livello senza ID
-      // Per i termini di primo livello, il nome dovrebbe essere unico
-      $matchingTerms = $this->searchTermByName($name);
+        // Ora filtriamo per trovare solo quelli che sono realmente termini radice
+        $rootTids = [];
+        foreach ($tids as $tid) {
+          // Controlliamo se il termine è radice (non ha un parent)
+          $parentTids = \Drupal::entityTypeManager()
+            ->getStorage('taxonomy_term')
+            ->loadParents($tid);
 
-      if (count($matchingTerms) == 1) {
-        $term = reset($matchingTerms);
-      } elseif (count($matchingTerms) > 1) {
-        // Situazione anomala: più termini di primo livello con lo stesso nome
-        // Cerchiamo di risolvere cercando quello senza parent
-        $rootTerms = [];
-        foreach ($matchingTerms as $potentialTerm) {
-          $termParent = $this->getTermParent($potentialTerm);
-          if ($termParent == 0) { // 0 indica nessun parent (radice)
-            $rootTerms[] = $potentialTerm;
+          if (empty($parentTids)) {
+            $rootTids[] = $tid;
           }
         }
 
-        if (count($rootTerms) == 1) {
-          $term = reset($rootTerms);
-        } elseif (count($rootTerms) > 1) {
-          throw new \Exception("Trovati più termini di primo livello con nome '$name'. Rilevata inconsistenza nei dati.", 1);
+        if (count($rootTids) == 1) {
+          // Abbiamo trovato esattamente un termine radice con questo nome
+          $term = Term::load(reset($rootTids));
+        } elseif (count($rootTids) > 1) {
+          // Situazione anomala: più termini radice con lo stesso nome
+          \Drupal::logger('silfi_triplette')->warning(
+            'Trovati multipli termini radice con nome "@name". Verrà usato il primo.',
+            ['@name' => $name]
+          );
+          $term = Term::load(reset($rootTids));
         }
-        // se rootTerms è vuoto, creeremo un nuovo termine
+      }
+    } else {
+      // Per termini di secondo livello, prima cerchiamo per ID se disponibile
+      if ($id !== null) {
+        $query = \Drupal::entityQuery('taxonomy_term')
+          ->condition('vid', $this->vid)
+          ->condition('field_id', $id)
+          ->accessCheck(FALSE);
+        $tids = $query->execute();
+
+        if (!empty($tids)) {
+          // Trovato un termine con questo ID
+          $term = Term::load(reset($tids));
+        } else {
+          // Cerchiamo nella tabella personalizzata
+          $existingTermData = $this->tripletteExist($id);
+          if ($existingTermData && !empty($existingTermData['tid'])) {
+            $term = Term::load($existingTermData['tid']);
+          }
+        }
+      }
+
+      // Se non abbiamo trovato un termine per ID, cerchiamo per nome e parent
+      if (!$term) {
+        $matchingTerms = $this->searchTermByName($name);
+
+        foreach ($matchingTerms as $potentialTerm) {
+          $termParent = $this->getTermParent($potentialTerm);
+          if ($termParent == $parent) {
+            $term = $potentialTerm;
+            break;
+          }
+        }
+
+        // Se non abbiamo trovato un termine con parent corretto, ma ne abbiamo uno con lo stesso nome
+        // e lo stesso ID, possiamo usarlo e aggiornarne il parent
+        if (!$term && $id !== null && count($matchingTerms) >= 1) {
+          foreach ($matchingTerms as $potentialTerm) {
+            $termId = $potentialTerm->get('field_id')->value;
+            if ($termId == $id) {
+              $term = $potentialTerm;
+              break;
+            }
+          }
+        }
       }
     }
 
-    // Aggiorniamo il termine esistente o ne creiamo uno nuovo
+    // Aggiorniamo o creiamo il termine
     if ($term) {
-      // Importante: qui aggiorniamo il parent, che potrebbe essere cambiato
       $term = $this->updateTerm($term, $name, $description, $parent, $id);
     } else {
       $term = $this->createTerm($name, $description, $parent, $id);
