@@ -65,6 +65,7 @@ class TripletteImport {
     $this->tripletteCount = [
       'update' => [],
       'create' => [],
+      'unpublish' => [],
       'delete' => [],
       'error'  => [],
     ];
@@ -126,8 +127,10 @@ class TripletteImport {
         }
       }
     }
+    // Spubblica i termini non più presenti nel sorgente
+    $this->unpublishNotExistentTriplette($idsServizi);
     // delete non matching terms.
-    $this->deleteNotExistentTriplette($idsServizi);
+    // $this->deleteNotExistentTriplette($idsServizi);
     // show messsages
     $this->showMessages();
   }
@@ -166,43 +169,62 @@ class TripletteImport {
    * @param int $parent
    * @param int $id
    * @return Term
+   * @throws \Exception
    */
   private function checkOrCreateTerm(string $name, string $description = null, int $parent = 0, int $id = null) : Term {
     $term = NULL;
 
-    // Prima, cerchiamo il termine per ID (se fornito)
-    if ($id) {
-      $existingTermData = $this->tripletteExist($id);
-      if ($existingTermData) {
-        $term = Term::load($existingTermData['tid']);
-      }
-    }
+    // Strategia diversa basata sul livello della tassonomia
+    if ($id !== null) {
+      // Questo è un termine di secondo livello con ID
+      // Cerchiamo prima per ID, indipendentemente dal parent
+      $query = \Drupal::entityQuery('taxonomy_term')
+        ->condition('vid', $this->vid)
+        ->condition('field_id', $id)
+        ->accessCheck(FALSE);
+      $tids = $query->execute();
 
-    // Se non trovato per ID, cerchiamo per nome e filtriamo per parent
-    if (!$term) {
-      $matchingTerms = $this->searchTermByName($name);
-
-      // Filtriamo i termini per parent per gestire i casi di omonimia
-      $sameParentTerms = [];
-      foreach ($matchingTerms as $potentialTerm) {
-        $termParent = $this->getTermParent($potentialTerm);
-        if ($termParent == $parent) {
-          $sameParentTerms[] = $potentialTerm;
+      if (!empty($tids)) {
+        // Trovato un termine con questo ID
+        $term = Term::load(reset($tids));
+        // Non importa quale sia il parent attuale, lo aggiorneremo dopo
+      } else {
+        // Cerchiamo nella nostra tabella personalizzata
+        $existingTermData = $this->tripletteExist($id);
+        if ($existingTermData) {
+          $term = Term::load($existingTermData['tid']);
         }
       }
+    } else {
+      // Questo è un termine di primo livello senza ID
+      // Per i termini di primo livello, il nome dovrebbe essere unico
+      $matchingTerms = $this->searchTermByName($name);
 
-      // Se troviamo più termini con lo stesso nome e parent, lanciamo un'eccezione
-      if (count($sameParentTerms) > 1) {
-        throw new \Exception("Trovati più termini con nome '$name' e stesso parent. Rilevata inconsistenza nei dati.", 1);
-      }
-      // Se troviamo esattamente un termine con il parent corretto, lo usiamo
-      elseif (count($sameParentTerms) == 1) {
-        $term = reset($sameParentTerms);
+      if (count($matchingTerms) == 1) {
+        $term = reset($matchingTerms);
+      } elseif (count($matchingTerms) > 1) {
+        // Situazione anomala: più termini di primo livello con lo stesso nome
+        // Cerchiamo di risolvere cercando quello senza parent
+        $rootTerms = [];
+        foreach ($matchingTerms as $potentialTerm) {
+          $termParent = $this->getTermParent($potentialTerm);
+          if ($termParent == 0) { // 0 indica nessun parent (radice)
+            $rootTerms[] = $potentialTerm;
+          }
+        }
+
+        if (count($rootTerms) == 1) {
+          $term = reset($rootTerms);
+        } elseif (count($rootTerms) > 1) {
+          throw new \Exception("Trovati più termini di primo livello con nome '$name'. Rilevata inconsistenza nei dati.", 1);
+        }
+        // se rootTerms è vuoto, creeremo un nuovo termine
       }
     }
 
     // Aggiorniamo il termine esistente o ne creiamo uno nuovo
     if ($term) {
+      // Importante: qui aggiorniamo il parent, che potrebbe essere cambiato
       $term = $this->updateTerm($term, $name, $description, $parent, $id);
     } else {
       $term = $this->createTerm($name, $description, $parent, $id);
@@ -310,6 +332,33 @@ class TripletteImport {
   }
 
   /**
+   * Unpublish non-existing terms
+   *
+   * @param array $ids
+   * @return void
+   */
+  private function unpublishNotExistentTriplette(array $ids) {
+    $connection = \Drupal::service('database');
+
+    $result = $connection->query("
+      SELECT sid, tid, id
+      FROM {silfi_triplette}
+      WHERE id NOT IN (:ids[])
+    ", [':ids[]' => $ids]);
+
+    if ($result) {
+      while ($row = $result->fetchAssoc()) {
+        $term = Term::load($row['tid']);
+        if ($term) {
+          $this->unpublishTerm($term);
+        }
+        // Non eliminiamo più il record dal database, ma aggiorniamo solo lo stato
+        // Potremmo aggiungere un campo 'active' alla tabella silfi_triplette se necessario
+      }
+    }
+  }
+
+  /**
    * Delete non-existing terms
    *
    * @param array $triplette
@@ -407,6 +456,18 @@ class TripletteImport {
   private function deleteTerm(Term $term) {
     $this->tripletteCount['delete'][] = $term->getName() . ' (' . $term->id() . ')';
     return $term->delete();
+  }
+
+  /**
+   * Unpublish taxonomy term instead of deleting it
+   *
+   * @param Term $term
+   * @return void
+   */
+  private function unpublishTerm(Term $term) {
+    $this->tripletteCount['unpublish'][] = $term->getName() . ' (' . $term->id() . ')';
+    $term->setPublished(FALSE);
+    $term->save();
   }
 
   /**
